@@ -1,232 +1,882 @@
-import React, { useEffect, useState } from 'react';
-import { UserRound, Mail, Phone, LockKeyhole, ShieldCheck, ArrowRight, Eye, EyeOff, CheckCircle2, LogIn, UserPlus, Sparkles, KeyRound } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  LockKeyhole,
+  UserRound,
+  Phone,
+  Mail,
+  Eye,
+  EyeOff,
+  CheckCircle2,
+  ShieldCheck,
+  ArrowRight,
+  RotateCcw,
+  AlertCircle,
+  Sparkles,
+} from "lucide-react";
+import "./styles.css";
 
-const OTP = '123456';
-const STORAGE_KEY = 'customerPortalDemoUsers';
+const EMPTY = {
+  fullName: "",
+  mobileNumber: "",
+  email: "",
+  password: "",
+  confirmPassword: "",
+  termsAccepted: false,
+};
 
-function getUsers() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-  catch { return []; }
+function passwordChecks(password) {
+  return [
+    { label: "At least 8 characters", ok: password.length >= 8 },
+    { label: "Uppercase letter", ok: /[A-Z]/.test(password) },
+    { label: "Lowercase letter", ok: /[a-z]/.test(password) },
+    { label: "Number", ok: /\d/.test(password) },
+    { label: "Special character", ok: /[^A-Za-z0-9]/.test(password) },
+  ];
 }
-function saveUsers(users) { localStorage.setItem(STORAGE_KEY, JSON.stringify(users)); }
-function validEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
+
+function passwordStrength(password) {
+  const score = passwordChecks(password).filter((x) => x.ok).length;
+
+  if (!password) return { score: 0, label: "Not set", level: "" };
+  if (score <= 2) return { score, label: "Weak", level: "weak" };
+  if (score <= 3) return { score, label: "Medium", level: "medium" };
+  if (score <= 4) return { score, label: "Strong", level: "strong" };
+
+  return { score, label: "Very strong", level: "very-strong" };
+}
+
+function validate(form) {
+  const errors = {};
+  const name = form.fullName.trim();
+
+  if (!name) {
+    errors.fullName = "Full name is required.";
+  } else if (
+    name.length < 3 ||
+    name.length > 50 ||
+    !/^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/.test(name)
+  ) {
+    errors.fullName = "Use letters and spaces only (3–50 characters).";
+  }
+
+  if (!/^\d{10}$/.test(form.mobileNumber)) {
+    errors.mobileNumber = "Mobile number must be exactly 10 digits.";
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(form.email.trim())) {
+    errors.email = "Please enter a valid email address.";
+  }
+
+  if (!form.password) {
+    errors.password = "Password is required.";
+  } else if (passwordChecks(form.password).some((item) => !item.ok)) {
+    errors.password = "Password must meet all five requirements.";
+  }
+
+  if (!form.confirmPassword) {
+    errors.confirmPassword = "Please confirm your password.";
+  } else if (form.password !== form.confirmPassword) {
+    errors.confirmPassword = "Passwords do not match.";
+  }
+
+  if (!form.termsAccepted) {
+    errors.termsAccepted = "You must accept the Terms & Conditions.";
+  }
+
+  return errors;
+}
+
+function Field({
+  id,
+  label,
+  icon: Icon,
+  error,
+  success,
+  hint,
+  children,
+}) {
+  return (
+    <div
+      className={`field ${
+        error ? "field-error" : success ? "field-success" : ""
+      }`}
+    >
+      <label htmlFor={id}>{label}</label>
+
+      <div className="input-shell">
+        {Icon && (
+          <Icon
+            className="input-icon"
+            size={17}
+            aria-hidden="true"
+          />
+        )}
+
+        {children}
+
+        {error ? (
+          <AlertCircle
+            className="field-status error-icon"
+            size={17}
+            aria-hidden="true"
+          />
+        ) : success ? (
+          <CheckCircle2
+            className="field-status success-icon"
+            size={17}
+            aria-hidden="true"
+          />
+        ) : null}
+      </div>
+
+      {error && (
+        <p
+          className="field-message error-message"
+          id={`${id}-error`}
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      {!error && hint && (
+        <p className="field-message">{hint}</p>
+      )}
+    </div>
+  );
+}
 
 export default function App() {
-  const [page, setPage] = useState('register');
-  const [form, setForm] = useState({ fullName: '', mobile: '', email: '', password: '', confirmPassword: '', terms: false });
-  const [login, setLogin] = useState({ identity: '', password: '' });
-  const [otp, setOtp] = useState('');
-  const [pendingUser, setPendingUser] = useState(null);
-  const [message, setMessage] = useState({ type: '', text: '' });
-  const [errors, setErrors] = useState({});
+  const [form, setForm] = useState(EMPTY);
+  const [touched, setTouched] = useState({});
+  const [submitted, setSubmitted] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [attempts, setAttempts] = useState(0);
-  const [expiry, setExpiry] = useState(0);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [now, setNow] = useState(Date.now());
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [screen, setScreen] = useState("register");
+  const [loading, setLoading] = useState(false);
+  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [otpError, setOtpError] = useState("");
+  const [seconds, setSeconds] = useState(45);
+
+  const errorRef = useRef(null);
+  const otpRefs = useRef([]);
+
+  const errors = useMemo(() => validate(form), [form]);
+  const checks = useMemo(
+    () => passwordChecks(form.password),
+    [form.password]
+  );
+  const strength = useMemo(
+    () => passwordStrength(form.password),
+    [form.password]
+  );
+
+  const invalid = Object.keys(errors).length > 0;
+  const email = form.email.trim().toLowerCase();
 
   useEffect(() => {
-    if (page !== 'otp' || !expiry) return;
-    const timer = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(timer);
-  }, [page, expiry]);
+    if (screen !== "otp" || seconds <= 0) return undefined;
 
-  const remaining = Math.max(0, Math.ceil((expiry - now) / 1000));
-  const setField = (key, value) => {
-    setForm(prev => ({ ...prev, [key]: value }));
-    setErrors(prev => ({ ...prev, [key]: '' }));
-    setMessage({ type: '', text: '' });
+    const timer = setTimeout(() => {
+      setSeconds((value) => value - 1);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [screen, seconds]);
+
+  const change = (key, value) => {
+    setForm((old) => ({ ...old, [key]: value }));
   };
 
-  function validateRegistration() {
-    const next = {};
-    if (form.fullName.trim().length < 2) next.fullName = 'Please enter your full name.';
-    if (!/^[6-9]\d{9}$/.test(form.mobile)) next.mobile = 'Enter a valid 10-digit Indian mobile number.';
-    if (!validEmail(form.email)) next.email = 'Enter a valid email address.';
-    if (form.password.length < 8) next.password = 'Use at least 8 characters.';
-    if (form.password !== form.confirmPassword) next.confirmPassword = 'Passwords do not match.';
-    if (!form.terms) next.terms = 'Please accept the Terms & Conditions.';
-    const users = getUsers();
-    if (users.some(u => u.email.toLowerCase() === form.email.toLowerCase())) next.email = 'This email is already registered.';
-    if (users.some(u => u.mobile === form.mobile)) next.mobile = 'This mobile number is already registered.';
-    setErrors(next);
-    return Object.keys(next).length === 0;
-  }
+  const touch = (key) => {
+    setTouched((old) => ({ ...old, [key]: true }));
+  };
 
-  function submitRegistration(e) {
-    e.preventDefault();
-    setMessage({ type: '', text: '' });
-    if (!validateRegistration()) return;
-    const user = {
-      fullName: form.fullName.trim(), mobile: form.mobile, email: form.email.trim().toLowerCase(),
-      // Demo only: never store real passwords in browser storage in a production app.
-      password: form.password, accountStatus: 'PENDING', termsAccepted: true,
-      createdAt: new Date().toISOString()
-    };
-    setPendingUser(user);
-    setOtp('');
-    setAttempts(0);
-    setExpiry(Date.now() + 120000);
-    setNow(Date.now());
-    setPage('otp');
-  }
+  const error = (key) =>
+    touched[key] || submitted ? errors[key] : "";
 
-  function verifyOtp(e) {
-    e.preventDefault();
-    if (remaining <= 0) { setMessage({ type: 'error', text: 'OTP expired. Please restart registration.' }); return; }
-    if (attempts >= 3) { setMessage({ type: 'error', text: 'Maximum attempts reached. Please restart registration.' }); return; }
-    if (otp !== OTP) {
-      const next = attempts + 1;
-      setAttempts(next);
-      setMessage({ type: 'error', text: next >= 3 ? 'Maximum attempts reached. Please restart registration.' : `Incorrect OTP. ${3 - next} attempt(s) remaining.` });
+  const valid = (key) => Boolean(form[key]) && !errors[key];
+
+  function submit(event) {
+    event.preventDefault();
+
+    setSubmitted(true);
+    setTouched({
+      fullName: true,
+      mobileNumber: true,
+      email: true,
+      password: true,
+      confirmPassword: true,
+      termsAccepted: true,
+    });
+
+    if (invalid) {
+      setTimeout(() => errorRef.current?.focus(), 0);
       return;
     }
-    const users = getUsers();
-    const activeUser = { ...pendingUser, accountStatus: 'ACTIVE', mobileVerified: true };
-    saveUsers([...users, activeUser]);
-    setMessage({ type: 'success', text: 'Verification successful. Your account is ready.' });
+
+    setLoading(true);
+
     setTimeout(() => {
-      setLogin({ identity: activeUser.email, password: '' });
-      setPage('login');
-      setMessage({ type: 'success', text: 'Account created successfully. Please log in.' });
+      setLoading(false);
+      setScreen("otp");
+      setSeconds(45);
+      setOtp(["", "", "", "", "", ""]);
+      setOtpError("");
     }, 700);
   }
 
-  function submitLogin(e) {
-    e.preventDefault();
-    const users = getUsers();
-    const found = users.find(u =>
-      (u.email.toLowerCase() === login.identity.trim().toLowerCase() || u.mobile === login.identity.trim()) &&
-      u.password === login.password && u.accountStatus === 'ACTIVE'
+  function changeOtp(index, value) {
+    const digit = value.replace(/\D/g, "").slice(-1);
+
+    setOtp((old) =>
+      old.map((item, i) => (i === index ? digit : item))
     );
-    if (!found) { setMessage({ type: 'error', text: 'Invalid credentials. Check your details or register first.' }); return; }
-    setCurrentUser(found);
-    setMessage({ type: '', text: '' });
-    setPage('dashboard');
+
+    setOtpError("");
+
+    if (digit && index < 5) {
+      otpRefs.current[index + 1]?.focus();
+    }
   }
 
-  function resetToRegister() {
-    setPage('register'); setMessage({ type: '', text: '' }); setErrors({});
-    setOtp(''); setPendingUser(null); setAttempts(0);
+  function verify(event) {
+    event.preventDefault();
+
+    if (otp.join("").length !== 6) {
+      setOtpError("Enter all 6 digits to continue.");
+      return;
+    }
+
+    if (otp.join("") !== "123456") {
+      setOtpError("Incorrect demo OTP. Please enter 123456.");
+      return;
+    }
+
+    setScreen("success");
   }
 
-  const titles = {
-    register: ['Create your account', 'Join us today. It only takes a few minutes.'],
-    otp: ['Verify your account', 'Enter the one-time password to complete registration.'],
-    login: ['Welcome back', 'Sign in to continue to your customer portal.'],
-    dashboard: ['You’re all set', 'Your customer portal is ready.']
-  };
+  function reset() {
+    setForm(EMPTY);
+    setTouched({});
+    setSubmitted(false);
+    setShowPassword(false);
+    setShowConfirm(false);
+    setScreen("register");
+    setOtp(["", "", "", "", "", ""]);
+    setOtpError("");
+  }
 
-  return <main className="app-shell">
-    <header className="topbar">
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); resetToRegister(); }}>
-        <span className="brand-mark"><ShieldCheck size={21}/></span>
-        <span>customer<span className="brand-light">portal</span></span>
-      </a>
-      <div className="topbar-right"><span className="secure-dot" /> Secure account demo</div>
-    </header>
+  return (
+    <main className="app-page">
+      <div
+        className="background-orb orb-one"
+        aria-hidden="true"
+      />
+      <div
+        className="background-orb orb-two"
+        aria-hidden="true"
+      />
 
-    <section className="layout">
-      <aside className="hero-panel">
-        <div className="hero-content">
-          <span className="eyebrow"><Sparkles size={14}/> CUSTOMER EXPERIENCE</span>
-          <h1>One account.<br/><span>Everything</span> connected.</h1>
-          <p>A simple, secure way to create your account and manage your customer access.</p>
-          <div className="feature-list">
-            <div><span className="feature-icon"><ShieldCheck size={18}/></span><span><b>Verification first</b><small>Confirm your details before access</small></span></div>
-            <div><span className="feature-icon"><LockKeyhole size={18}/></span><span><b>Protected access</b><small>Clear feedback at every step</small></span></div>
-            <div><span className="feature-icon"><CheckCircle2 size={18}/></span><span><b>Simple onboarding</b><small>Register and sign in in minutes</small></span></div>
-          </div>
-        </div>
-        <div className="hero-footer">CUS-01 · CUS-02 <span>•</span> Registration & Login</div>
-        <div className="orb orb-one"/><div className="orb orb-two"/>
-      </aside>
-
-      <section className="form-side">
-        <div className="form-wrap">
-          {page !== 'dashboard' && <div className="tabs">
-            <button className={page === 'register' || page === 'otp' ? 'tab active' : 'tab'} onClick={resetToRegister}><UserPlus size={16}/> Register</button>
-            <button className={page === 'login' ? 'tab active' : 'tab'} onClick={() => { setPage('login'); setMessage({ type: '', text: '' }); }}><LogIn size={16}/> Login</button>
-          </div>}
-          <div className="form-heading">
-            <div className="heading-icon">{page === 'login' ? <KeyRound/> : page === 'otp' ? <ShieldCheck/> : page === 'dashboard' ? <CheckCircle2/> : <UserPlus/>}</div>
-            <h2>{titles[page][0]}</h2>
-            <p>{titles[page][1]}</p>
+      <section
+        className="registration-card"
+        aria-labelledby="page-title"
+      >
+        <aside className="brand-panel">
+          <div className="brand-lockup">
+            <span className="brand-mark">
+              <LockKeyhole size={22} />
+            </span>
+            <span className="brand-name">ShowPass</span>
           </div>
 
-          {message.text && <div className={`notice ${message.type}`} role="status">{message.type === 'success' ? <CheckCircle2 size={17}/> : <ShieldCheck size={17}/>}<span>{message.text}</span></div>}
+          <div className="brand-copy">
+            <span className="eyebrow">
+              <Sparkles size={14} />
+              CUSTOMER PORTAL
+            </span>
 
-          {page === 'register' && <form onSubmit={submitRegistration} noValidate>
-            <div className="field">
-              <label htmlFor="fullName">Full name</label>
-              <div className={`input-wrap ${errors.fullName ? 'invalid' : ''}`}><UserRound size={17}/><input id="fullName" value={form.fullName} onChange={e => setField('fullName', e.target.value)} placeholder="Enter your full name" autoComplete="name"/></div>
-              {errors.fullName && <small className="error">{errors.fullName}</small>}
-            </div>
-            <div className="field">
-              <label htmlFor="mobile">Mobile number</label>
-              <div className={`input-wrap ${errors.mobile ? 'invalid' : ''}`}><Phone size={17}/><span className="country-code">+91</span><input id="mobile" value={form.mobile} onChange={e => setField('mobile', e.target.value.replace(/\D/g, '').slice(0,10))} placeholder="10-digit mobile number" inputMode="numeric" autoComplete="tel-national"/></div>
-              {errors.mobile && <small className="error">{errors.mobile}</small>}
-            </div>
-            <div className="field">
-              <label htmlFor="email">Email address</label>
-              <div className={`input-wrap ${errors.email ? 'invalid' : ''}`}><Mail size={17}/><input id="email" type="email" value={form.email} onChange={e => setField('email', e.target.value)} placeholder="you@example.com" autoComplete="email"/></div>
-              {errors.email && <small className="error">{errors.email}</small>}
-            </div>
-            <div className="field">
-              <label htmlFor="password">Password</label>
-              <div className={`input-wrap ${errors.password ? 'invalid' : ''}`}><LockKeyhole size={17}/><input id="password" type={showPassword ? 'text' : 'password'} value={form.password} onChange={e => setField('password', e.target.value)} placeholder="Minimum 8 characters" autoComplete="new-password"/><button className="icon-button" type="button" aria-label="Toggle password visibility" onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div>
-              {errors.password && <small className="error">{errors.password}</small>}
-            </div>
-            <div className="field">
-              <label htmlFor="confirmPassword">Confirm password</label>
-              <div className={`input-wrap ${errors.confirmPassword ? 'invalid' : ''}`}><LockKeyhole size={17}/><input id="confirmPassword" type={showPassword ? 'text' : 'password'} value={form.confirmPassword} onChange={e => setField('confirmPassword', e.target.value)} placeholder="Re-enter your password" autoComplete="new-password"/></div>
-              {errors.confirmPassword && <small className="error">{errors.confirmPassword}</small>}
-            </div>
-            <label className={`terms ${errors.terms ? 'terms-error' : ''}`}><input type="checkbox" checked={form.terms} onChange={e => setField('terms', e.target.checked)}/><span>I agree to the <a href="#terms" onClick={e => { e.preventDefault(); alert('Demo Terms & Conditions: Use accurate details and keep your login credentials private.'); }}>Terms & Conditions</a></span></label>
-            {errors.terms && <small className="error terms-msg">{errors.terms}</small>}
-            <button className="primary-button" type="submit">Create account <ArrowRight size={17}/></button>
-            <p className="switch-copy">Already have an account? <button type="button" onClick={() => { setPage('login'); setMessage({ type: '', text: '' }); }}>Sign in</button></p>
-          </form>}
+            <h1 id="page-title">
+              {screen === "register" ? (
+                <>
+                  Create Your
+                  <br />
+                  Customer Account
+                </>
+              ) : screen === "otp" ? (
+                <>
+                  One more
+                  <br />
+                  security step
+                </>
+              ) : (
+                <>
+                  You’re all
+                  <br />
+                  set to go!
+                </>
+              )}
+            </h1>
 
-          {page === 'otp' && <form onSubmit={verifyOtp} className="otp-form">
-            <div className="otp-intro"><div className="otp-badge"><ShieldCheck size={26}/></div><p>We’re simulating a verification step for <b>{pendingUser?.email}</b>.</p></div>
-            <label className="otp-label" htmlFor="otp">6-digit verification code</label>
-            <input id="otp" className="otp-input" value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0,6))} placeholder="••••••" inputMode="numeric" maxLength={6} autoComplete="one-time-code"/>
-            <div className="otp-meta"><span>Demo code: <b>123456</b></span><span className={remaining < 20 ? 'time-low' : ''}>{Math.floor(remaining/60)}:{String(remaining%60).padStart(2,'0')} remaining</span></div>
-            <button className="primary-button" type="submit" disabled={attempts >= 3 || remaining <= 0}>Verify & continue <ArrowRight size={17}/></button>
-            <button className="text-button" type="button" onClick={resetToRegister}>Back to registration</button>
-          </form>}
+            <p>
+              {screen === "register"
+                ? "Join ShowPass and get access to amazing events, exclusive offers and more."
+                : screen === "otp"
+                ? "Verify your mobile number to complete registration."
+                : "Your demo registration has been completed successfully."}
+            </p>
+          </div>
 
-          {page === 'login' && <form onSubmit={submitLogin}>
-            <div className="field">
-              <label htmlFor="identity">Email or mobile number</label>
-              <div className="input-wrap"><UserRound size={17}/><input id="identity" value={login.identity} onChange={e => setLogin({...login, identity: e.target.value})} placeholder="Enter email or mobile" autoComplete="username" required/></div>
-            </div>
-            <div className="field">
-              <label htmlFor="loginPassword">Password</label>
-              <div className="input-wrap"><LockKeyhole size={17}/><input id="loginPassword" type={showPassword ? 'text' : 'password'} value={login.password} onChange={e => setLogin({...login, password: e.target.value})} placeholder="Enter your password" autoComplete="current-password" required/><button className="icon-button" type="button" aria-label="Toggle password visibility" onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div>
-            </div>
-            <button className="primary-button" type="submit">Sign in <ArrowRight size={17}/></button>
-            <p className="switch-copy">New here? <button type="button" onClick={resetToRegister}>Create an account</button></p>
-          </form>}
+          <div className="illustration" aria-hidden="true">
+            <div className="illustration-glow" />
 
-          {page === 'dashboard' && <div className="dashboard">
-            <div className="success-mark"><CheckCircle2 size={34}/></div>
-            <p className="dashboard-greeting">Hello, <b>{currentUser?.fullName}</b></p>
-            <p className="dashboard-copy">You have successfully signed in to the customer portal demo.</p>
-            <div className="profile-card">
-              <div className="profile-row"><span>Full name</span><b>{currentUser?.fullName}</b></div>
-              <div className="profile-row"><span>Email</span><b>{currentUser?.email}</b></div>
-              <div className="profile-row"><span>Mobile</span><b>+91 {currentUser?.mobile}</b></div>
-              <div className="profile-row"><span>Account status</span><b className="status-active">Active</b></div>
+            <div className="ticket ticket-back">
+              <span>SHOW</span>
+              <b>PASS</b>
             </div>
-            <button className="primary-button" onClick={() => { setCurrentUser(null); setLogin({ identity: '', password: '' }); setPage('login'); setMessage({ type: 'success', text: 'You have been signed out.' }); }}>Sign out <ArrowRight size={17}/></button>
-          </div>}
 
-          <div className="form-bottom"><span><LockKeyhole size={13}/> Demo project · No data sent to a server</span><span>v1.0</span></div>
-        </div>
+            <div className="ticket ticket-front">
+              <LockKeyhole size={31} />
+              <span>YOUR ACCESS</span>
+              <b>ALL SET</b>
+            </div>
+
+            <div className="spark spark-a">✦</div>
+            <div className="spark spark-b">✧</div>
+            <div className="dot-pattern" />
+          </div>
+
+          <div className="brand-footer">
+            <ShieldCheck size={16} />
+            Your information stays protected
+          </div>
+        </aside>
+
+        <section className="form-panel">
+          {screen === "register" && (
+            <>
+              <header className="form-heading">
+                <span className="step-label">STEP 1 OF 2</span>
+                <h2>Create account</h2>
+                <p>Fill in your details to get started.</p>
+              </header>
+
+              {submitted && invalid && (
+                <div
+                  className="error-summary"
+                  role="alert"
+                  aria-live="assertive"
+                >
+                  <div className="summary-title">
+                    <AlertCircle size={18} />
+                    Please correct the following errors:
+                  </div>
+
+                  <ul>
+                    {Object.entries(errors).map(([key, message]) => (
+                      <li key={key}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            document.getElementById(key)?.focus()
+                          }
+                        >
+                          {message}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <form onSubmit={submit} noValidate>
+                <Field
+                  id="fullName"
+                  label="Full name"
+                  icon={UserRound}
+                  error={error("fullName")}
+                  success={valid("fullName")}
+                  hint="Use your name as it appears on your ID."
+                >
+                  <input
+                    ref={
+                      submitted && errors.fullName ? errorRef : null
+                    }
+                    id="fullName"
+                    name="fullName"
+                    autoComplete="name"
+                    placeholder="Enter your full name"
+                    value={form.fullName}
+                    maxLength={50}
+                    aria-invalid={Boolean(error("fullName"))}
+                    onChange={(e) =>
+                      change("fullName", e.target.value)
+                    }
+                    onBlur={() => touch("fullName")}
+                  />
+                </Field>
+
+                <Field
+                  id="mobileNumber"
+                  label="Mobile number"
+                  icon={Phone}
+                  error={error("mobileNumber")}
+                  success={valid("mobileNumber")}
+                  hint={`${form.mobileNumber.length}/10 digits`}
+                >
+                  <input
+                    ref={
+                      submitted &&
+                      !errors.fullName &&
+                      errors.mobileNumber
+                        ? errorRef
+                        : null
+                    }
+                    id="mobileNumber"
+                    name="mobileNumber"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    placeholder="Enter 10-digit mobile number"
+                    value={form.mobileNumber}
+                    maxLength={10}
+                    aria-invalid={Boolean(error("mobileNumber"))}
+                    onChange={(e) =>
+                      change(
+                        "mobileNumber",
+                        e.target.value.replace(/\D/g, "").slice(0, 10)
+                      )
+                    }
+                    onBlur={() => touch("mobileNumber")}
+                  />
+                </Field>
+
+                <Field
+                  id="email"
+                  label="Email address"
+                  icon={Mail}
+                  error={error("email")}
+                  success={valid("email")}
+                  hint={
+                    valid("email")
+                      ? `We'll use ${email}`
+                      : "We'll use this to identify your account."
+                  }
+                >
+                  <input
+                    ref={
+                      submitted &&
+                      !errors.fullName &&
+                      !errors.mobileNumber &&
+                      errors.email
+                        ? errorRef
+                        : null
+                    }
+                    id="email"
+                    name="email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={form.email}
+                    aria-invalid={Boolean(error("email"))}
+                    onChange={(e) => change("email", e.target.value)}
+                    onBlur={() => {
+                      touch("email");
+                      if (form.email) {
+                        change(
+                          "email",
+                          form.email.trim().toLowerCase()
+                        );
+                      }
+                    }}
+                  />
+                </Field>
+
+                <Field
+                  id="password"
+                  label="Password"
+                  icon={LockKeyhole}
+                  error={error("password")}
+                  success={valid("password")}
+                >
+                  <input
+                    id="password"
+                    name="password"
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="new-password"
+                    placeholder="Create a strong password"
+                    value={form.password}
+                    aria-invalid={Boolean(error("password"))}
+                    aria-describedby="password-requirements"
+                    onChange={(e) =>
+                      change("password", e.target.value)
+                    }
+                    onBlur={() => touch("password")}
+                  />
+
+                  <button
+                    className="icon-button input-action"
+                    type="button"
+                    onClick={() =>
+                      setShowPassword((value) => !value)
+                    }
+                    aria-label={
+                      showPassword ? "Hide password" : "Show password"
+                    }
+                  >
+                    {showPassword ? (
+                      <EyeOff size={18} />
+                    ) : (
+                      <Eye size={18} />
+                    )}
+                  </button>
+                </Field>
+
+                <div
+                  className="strength-block"
+                  id="password-requirements"
+                >
+                  <div className="strength-top">
+                    <span>Password strength</span>
+                    <strong
+                      className={`strength-label ${strength.level}`}
+                    >
+                      {strength.label}
+                    </strong>
+                  </div>
+
+                  <div
+                    className={`strength-meter ${strength.level}`}
+                    aria-label={`Password strength: ${strength.label}`}
+                  >
+                    {[1, 2, 3, 4, 5].map((number) => (
+                      <span
+                        key={number}
+                        className={
+                          number <= strength.score ? "filled" : ""
+                        }
+                      />
+                    ))}
+                  </div>
+
+                  <div className="password-checks">
+                    {checks.map((check) => (
+                      <span
+                        key={check.label}
+                        className={
+                          check.ok ? "check-passed" : ""
+                        }
+                      >
+                        <CheckCircle2 size={13} />
+                        {check.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <Field
+                  id="confirmPassword"
+                  label="Confirm password"
+                  icon={LockKeyhole}
+                  error={error("confirmPassword")}
+                  success={valid("confirmPassword")}
+                >
+                  <input
+                    ref={
+                      submitted &&
+                      !errors.fullName &&
+                      !errors.mobileNumber &&
+                      !errors.email &&
+                      !errors.password &&
+                      errors.confirmPassword
+                        ? errorRef
+                        : null
+                    }
+                    id="confirmPassword"
+                    name="confirmPassword"
+                    type={showConfirm ? "text" : "password"}
+                    autoComplete="new-password"
+                    placeholder="Re-enter your password"
+                    value={form.confirmPassword}
+                    aria-invalid={Boolean(error("confirmPassword"))}
+                    onChange={(e) =>
+                      change("confirmPassword", e.target.value)
+                    }
+                    onBlur={() => touch("confirmPassword")}
+                  />
+
+                  <button
+                    className="icon-button input-action"
+                    type="button"
+                    onClick={() =>
+                      setShowConfirm((value) => !value)
+                    }
+                    aria-label={
+                      showConfirm
+                        ? "Hide confirm password"
+                        : "Show confirm password"
+                    }
+                  >
+                    {showConfirm ? (
+                      <EyeOff size={18} />
+                    ) : (
+                      <Eye size={18} />
+                    )}
+                  </button>
+                </Field>
+
+                <div
+                  className={`terms-row ${
+                    error("termsAccepted") ? "terms-error" : ""
+                  }`}
+                >
+                  <input
+                    id="termsAccepted"
+                    name="termsAccepted"
+                    type="checkbox"
+                    checked={form.termsAccepted}
+                    onChange={(e) =>
+                      change("termsAccepted", e.target.checked)
+                    }
+                    onBlur={() => touch("termsAccepted")}
+                    aria-invalid={Boolean(error("termsAccepted"))}
+                  />
+
+                  <label htmlFor="termsAccepted">
+                    I agree to the{" "}
+                    <button
+                      type="button"
+                      className="text-link"
+                      onClick={() =>
+                        window.alert(
+                          "Demo Terms & Conditions: use this form for testing only. Do not enter real passwords or personal information."
+                        )
+                      }
+                    >
+                      Terms &amp; Conditions
+                    </button>{" "}
+                    and Privacy Policy.
+                  </label>
+                </div>
+
+                {error("termsAccepted") && (
+                  <p
+                    className="field-message error-message terms-message"
+                    role="alert"
+                  >
+                    {error("termsAccepted")}
+                  </p>
+                )}
+
+                <div className="form-actions">
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={loading}
+                  >
+                    {loading ? (
+                      <>
+                        Registering… <span className="spinner" />
+                      </>
+                    ) : (
+                      <>
+                        Create account <ArrowRight size={17} />
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={reset}
+                  >
+                    <RotateCcw size={15} />
+                    Reset
+                  </button>
+                </div>
+
+                <p className="demo-note">
+                  <ShieldCheck size={14} />
+                  Demo only. Do not enter real passwords.
+                </p>
+              </form>
+            </>
+          )}
+
+          {screen === "otp" && (
+            <div className="state-screen">
+              <span className="state-icon">
+                <ShieldCheck size={30} />
+              </span>
+
+              <span className="step-label">STEP 2 OF 2</span>
+              <h2>Verify your number</h2>
+
+              <p className="state-description">
+                Enter the 6-digit demo code to complete registration.
+              </p>
+
+              <div className="masked-number">
+                <Phone size={16} />
+                +91 ••••••{form.mobileNumber.slice(-4)}
+              </div>
+
+              <form onSubmit={verify}>
+                <div className="otp-inputs" aria-label="Six digit OTP">
+                  {otp.map((digit, index) => (
+                    <input
+                      key={index}
+                      ref={(node) => {
+                        otpRefs.current[index] = node;
+                      }}
+                      aria-label={`OTP digit ${index + 1}`}
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete={
+                        index === 0 ? "one-time-code" : "off"
+                      }
+                      maxLength={1}
+                      value={digit}
+                      onChange={(e) =>
+                        changeOtp(index, e.target.value)
+                      }
+                      onKeyDown={(e) => {
+                        if (
+                          e.key === "Backspace" &&
+                          !otp[index] &&
+                          index > 0
+                        ) {
+                          otpRefs.current[index - 1]?.focus();
+                        }
+
+                        if (e.key === "ArrowLeft" && index > 0) {
+                          otpRefs.current[index - 1]?.focus();
+                        }
+
+                        if (
+                          e.key === "ArrowRight" &&
+                          index < 5
+                        ) {
+                          otpRefs.current[index + 1]?.focus();
+                        }
+                      }}
+                      onPaste={(e) => {
+                        e.preventDefault();
+
+                        const digits = e.clipboardData
+                          .getData("text")
+                          .replace(/\D/g, "")
+                          .slice(0, 6)
+                          .split("");
+
+                        setOtp((old) =>
+                          old.map((value, i) => digits[i] || "")
+                        );
+
+                        otpRefs.current[
+                          Math.min(digits.length, 5)
+                        ]?.focus();
+                      }}
+                    />
+                  ))}
+                </div>
+
+                {otpError && (
+                  <p className="field-message error-message" role="alert">
+                    {otpError}
+                  </p>
+                )}
+
+                <p className="demo-otp">
+                  Demo OTP: <strong>123456</strong>
+                </p>
+
+                <button
+                  className="primary-button full-width"
+                  type="submit"
+                >
+                  Verify &amp; continue <ArrowRight size={17} />
+                </button>
+              </form>
+
+              <button
+                className="text-button"
+                type="button"
+                disabled={seconds > 0}
+                onClick={() => {
+                  setSeconds(45);
+                  setOtpError("Demo OTP resent. Use 123456.");
+                }}
+              >
+                {seconds > 0
+                  ? `Resend code in 00:${String(seconds).padStart(2, "0")}`
+                  : "Resend OTP"}
+              </button>
+
+              <button
+                className="back-link"
+                type="button"
+                onClick={() => setScreen("register")}
+              >
+                ← Back to registration
+              </button>
+            </div>
+          )}
+
+          {screen === "success" && (
+            <div className="state-screen success-screen">
+              <span className="success-badge">
+                <CheckCircle2 size={43} />
+              </span>
+
+              <span className="step-label success-step">
+                REGISTRATION COMPLETE
+              </span>
+
+              <h2>You’re all set!</h2>
+
+              <p className="state-description">
+                Your demo registration has been verified successfully.
+              </p>
+
+              <div className="profile-summary">
+                <div className="profile-avatar">
+                  {form.fullName.trim().charAt(0).toUpperCase()}
+                </div>
+
+                <div>
+                  <strong>{form.fullName.trim()}</strong>
+                  <span>{email}</span>
+                  <small>+91 {form.mobileNumber}</small>
+                </div>
+              </div>
+
+              <div className="success-info">
+                <CheckCircle2 size={17} />
+                All form validations passed.
+              </div>
+
+              <button
+                className="primary-button full-width"
+                type="button"
+                onClick={reset}
+              >
+                Back to registration <ArrowRight size={17} />
+              </button>
+
+              <p className="demo-note">
+                <ShieldCheck size={14} />
+                Demo flow only. No account was created on a server.
+              </p>
+            </div>
+          )}
+        </section>
       </section>
-    </section>
-    <footer className="page-footer">Customer Registration & Login <span>•</span> CUS-01 / CUS-02</footer>
-  </main>;
+
+      <footer className="page-footer">
+        © {new Date().getFullYear()} ShowPass · Customer Registration
+        &amp; Login Modules
+      </footer>
+    </main>
+  );
 }
